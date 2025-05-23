@@ -34,22 +34,6 @@ export type Alert = {
     }>;
 };
 
-// async function highstsubjectiveHeadGauge() {
-//     if (highstsubjectiveHeadGauge.cache) {
-//         return highstsubjectiveHeadGauge.cache;
-//     }
-//
-//     const query = config.CHAIN_ID === "mocha-4"
-//         ? `max(hdr_sync_subjective_head_gauge{exported_job=~"mocha-4/.*"})`
-//         : `max(hdr_sync_subjective_head_gauge{exported_job=~"celestia/.*"})`;
-//
-//     const result = await nodesAPI.promQuery.instantQuery(query);
-//     const value = result.result[0]?.value?.value ?? null;
-//
-//     highstsubjectiveHeadGauge.cache = value;
-//     return value;
-// }
-
 async function highstsubjectiveHeadGauge() {
     if (highstsubjectiveHeadGauge.cache) {
         return highstsubjectiveHeadGauge.cache;

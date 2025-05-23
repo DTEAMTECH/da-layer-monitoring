@@ -1,5 +1,4 @@
 import { EmbedBuilder, REST, Routes } from "discord.js";
-import { TIME_RECENT_ALERT_IN_MINUTES } from "app/constant.ts";
 import pRetry from "p-retry";
 import config from "app/config.ts";
 
@@ -113,15 +112,3 @@ export const disApi = new DiscordApiHelper({
 
 export const isObject = (value: unknown) =>
     typeof value === "object" && value !== null;
-
-export function isRecent(
-    referenceTimeIso: string | null,
-    thresholdMinutes: number = TIME_RECENT_ALERT_IN_MINUTES,
-): boolean {
-  if (!referenceTimeIso) return false;
-  const referenceTime = new Date(referenceTimeIso);
-  const targetTime = new Date();
-  const diffMilliseconds = targetTime.getTime() - referenceTime.getTime();
-  const diffMinutes = Math.floor(diffMilliseconds / 60000);
-  return diffMinutes < thresholdMinutes;
-}

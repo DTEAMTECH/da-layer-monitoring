@@ -47,7 +47,6 @@ class NodesAPI {
       for (const result of data.result) {
         const jobLabel: string | undefined = result.metric.labels.exported_job;
 
-        // if (jobLabel && (jobLabel.startsWith("celestia/") || jobLabel.startsWith("mocha-4/"))) {
         if (jobLabel && jobLabel.startsWith("celestia/")) {
           const parts = jobLabel.split("/");
           if (parts.length >= 2) {

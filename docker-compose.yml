@@ -17,6 +17,8 @@ services:
     image: deno-image
     env_file:
       - .env
+    volumes:
+      - ./bot_data:/app/bot_data
     command: sh -c "while true; do deno run -A src/cron.ts || echo 'Cron task failed'; sleep 300; done"
 
   prometheus:

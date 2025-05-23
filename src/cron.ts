@@ -1,16 +1,23 @@
-import {kv} from "app/services/storage.ts";
-import {nodesAPI} from "app/services/api.ts";
-import {disApi, isRecent} from "app/utils.ts";
-import {EmbedBuilder} from "discord.js";
-import alerts, {CheckResult} from "app/alerts.ts";
+import { kv } from "app/services/storage.ts";
+import { nodesAPI } from "app/services/api.ts";
+import { disApi } from "app/utils.ts";
+import { EmbedBuilder } from "discord.js";
+import alerts, { CheckResult } from "app/alerts.ts";
 import config from "app/config.ts";
+import { CONSECUTIVE_ALERTS_THRESHOLD } from "app/constant.ts";
 
 interface Subscription {
     userId: string;
     nodeId: string;
     nodeType: string;
     subscribedAt: string;
-    alerted: Record<string, string>;
+    state?: Record<
+        string,
+        {
+            count: number;
+            lastFired: boolean;
+        }
+    >;
 }
 
 const createEmbed = (title: string, text: string) =>
@@ -26,16 +33,13 @@ async function runCron() {
     try {
         const allNodeIds = await nodesAPI.getAllNodesIds();
 
-        const checksMap = new Map<
-            string,
-            { name: string; message: Function; isFired: boolean }[]
-        >();
+        const checksMap = new Map<string, { name: string; message: Function; isFired: boolean }[]>();
         for (const nodeId of allNodeIds) {
             const results: { name: string; message: Function; isFired: boolean }[] = [];
             for (const alertDef of alerts) {
                 let res: CheckResult;
                 try {
-                    res = await alertDef.check({nodeId});
+                    res = await alertDef.check({ nodeId });
                 } catch (e) {
                     console.error(`Error checking ${nodeId} / ${alertDef.name}:`, e);
                     continue;
@@ -49,44 +53,42 @@ async function runCron() {
             checksMap.set(nodeId, results);
         }
 
-        for await (const {key, value} of kv.list<Subscription>({prefix: ["subscription"]})) {
-            if (!value || typeof value !== "object") continue;
-            const [_, userId, nodeId] = key;
+        for await (const { key, value: prev } of kv.list<Subscription>({ prefix: ["subscription"] })) {
+            if (!prev || typeof prev !== "object") continue;
+            const [, userId, nodeId] = key;
             const checks = checksMap.get(nodeId);
             if (!checks) continue;
 
-            const prev = value;
-            const prevAlerted = prev.alerted ?? {};
-            const newAlerted: Record<string, string> = {};
-            const networkType = config.CHAIN_ID === "mocha-4" ? "Testnet" : "Mainnet";
+            const prevState = prev.state ?? {};
+            const newState: Subscription["state"] = {};
 
-            for (const {name, message, isFired} of checks) {
-                const {alertMessage, resolveMessage} = message(
+            for (const { name, message, isFired } of checks) {
+                const { count: prevCount = 0, lastFired: wasActive = false } = prevState[name] || {};
+                const newCount = isFired ? prevCount + 1 : 0;
+                const isActive = newCount >= CONSECUTIVE_ALERTS_THRESHOLD;
+
+                const { alertMessage, resolveMessage } = message(
                     userId,
                     nodeId,
                     prev.nodeType,
-                    networkType,
+                    config.CHAIN_ID === "mocha-4" ? "Testnet" : "Mainnet",
                 );
-                const embed = isFired
-                    ? createEmbed(alertMessage.title, alertMessage.text)
-                    : createEmbed(resolveMessage.title, resolveMessage.text);
+                const embedAlert = createEmbed(alertMessage.title, alertMessage.text);
+                const embedResolve = createEmbed(resolveMessage.title, resolveMessage.text);
 
-                if (isFired) {
-                    const prevTs = prevAlerted[name];
-                    if (prevTs && isRecent(prevTs)) {
-                        newAlerted[name] = prevTs;
-                    } else {
-                        await disApi.sendEmbedMessageUser(userId, embed);
-                        newAlerted[name] = new Date().toISOString();
-                    }
-                } else if (prevAlerted[name]) {
-                    await disApi.sendEmbedMessageUser(userId, embed);
+                if (isFired && isActive && !wasActive) {
+                    await disApi.sendEmbedMessageUser(userId, embedAlert);
                 }
+                else if (!isFired && wasActive) {
+                    await disApi.sendEmbedMessageUser(userId, embedResolve);
+                }
+
+                newState[name] = { count: newCount, lastFired: isActive };
             }
 
             await kv.set<Subscription>(["subscription", userId, nodeId], {
                 ...prev,
-                alerted: newAlerted,
+                state: newState,
             });
         }
     } catch (error) {

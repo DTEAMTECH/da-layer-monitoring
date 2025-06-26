@@ -4,7 +4,7 @@ import {
     SYNC_TIME_CHECK,
 } from "app/constant.ts";
 import { nodesAPI } from "app/services/api.ts";
-import config from "app/config.ts";
+import config, { getJobPattern, getNetworkType } from "app/config.ts";
 
 type checkPayload = {
     nodeId: string;
@@ -49,8 +49,12 @@ async function highstsubjectiveHeadGauge() {
     console.log(`🔄 Fetching fresh highstsubjectiveHeadGauge data...`);
     
     try {
+        // Use centralized network-aware logic
+        const jobPattern = getJobPattern();
+        console.log(`🔍 Fetching max head gauge with job pattern: "${jobPattern}"`);
+        
         const result = await nodesAPI.promQuery.instantQuery(
-            `max(hdr_sync_subjective_head_gauge{exported_job=~"celestia/.*"})`,
+            `max(hdr_sync_subjective_head_gauge{exported_job=~"${jobPattern}"})`,
         );
 
         const value = result.result[0]?.value?.value ?? null;
@@ -90,9 +94,22 @@ const alerts = [
         }),
         async check(payload: checkPayload) {
             const { nodeId } = payload;
-            const connectedPeers = await nodesAPI.promQuery.instantQuery(
-                `full_discovery_amount_of_peers{exported_instance="${nodeId}"}`,
-            );
+            // Try exported_instance first, then instance
+            let connectedPeers;
+            try {
+                connectedPeers = await nodesAPI.promQuery.instantQuery(
+                    `full_discovery_amount_of_peers{exported_instance="${nodeId}"}`,
+                );
+                if (!connectedPeers.result || connectedPeers.result.length === 0) {
+                    connectedPeers = await nodesAPI.promQuery.instantQuery(
+                        `full_discovery_amount_of_peers{instance="${nodeId}"}`,
+                    );
+                }
+            } catch (error) {
+                connectedPeers = await nodesAPI.promQuery.instantQuery(
+                    `full_discovery_amount_of_peers{instance="${nodeId}"}`,
+                );
+            }
             const [data] = connectedPeers.result;
             return {
                 isFired: !data || data.value.value < CONNECTED_PEERS_THRESHOLD,
@@ -114,9 +131,21 @@ const alerts = [
         }),
         async check(payload: checkPayload) {
             const { nodeId } = payload;
-            const hightChange = await nodesAPI.promQuery.instantQuery(
-                `increase(hdr_sync_subjective_head_gauge{exported_instance="${nodeId}"}[${SYNC_TIME_CHECK}])`,
-            );
+            let hightChange;
+            try {
+                hightChange = await nodesAPI.promQuery.instantQuery(
+                    `increase(hdr_sync_subjective_head_gauge{exported_instance="${nodeId}"}[${SYNC_TIME_CHECK}])`,
+                );
+                if (!hightChange.result || hightChange.result.length === 0) {
+                    hightChange = await nodesAPI.promQuery.instantQuery(
+                        `increase(hdr_sync_subjective_head_gauge{instance="${nodeId}"}[${SYNC_TIME_CHECK}])`,
+                    );
+                }
+            } catch (error) {
+                hightChange = await nodesAPI.promQuery.instantQuery(
+                    `increase(hdr_sync_subjective_head_gauge{instance="${nodeId}"}[${SYNC_TIME_CHECK}])`,
+                );
+            }
             const [data] = hightChange.result;
             return {
                 isFired: !data || data.value.value === 0,
@@ -139,10 +168,24 @@ const alerts = [
         async check(payload: checkPayload) {
             const { nodeId } = payload;
             const highestSubjectiveHeadGaugeValue = await highstsubjectiveHeadGauge();
-            const hightOfNodeResult = await nodesAPI.promQuery
-                .instantQuery(
-                    `hdr_sync_subjective_head_gauge{exported_instance="${nodeId}"}`,
-                );
+            let hightOfNodeResult;
+            try {
+                hightOfNodeResult = await nodesAPI.promQuery
+                    .instantQuery(
+                        `hdr_sync_subjective_head_gauge{exported_instance="${nodeId}"}`,
+                    );
+                if (!hightOfNodeResult.result || hightOfNodeResult.result.length === 0) {
+                    hightOfNodeResult = await nodesAPI.promQuery
+                        .instantQuery(
+                            `hdr_sync_subjective_head_gauge{instance="${nodeId}"}`,
+                        );
+                }
+            } catch (error) {
+                hightOfNodeResult = await nodesAPI.promQuery
+                    .instantQuery(
+                        `hdr_sync_subjective_head_gauge{instance="${nodeId}"}`,
+                    );
+            }
             const [data] = hightOfNodeResult.result;
             return {
                 isFired: !data ||
@@ -167,9 +210,21 @@ const alerts = [
         }),
         async check(payload: checkPayload) {
             const { nodeId } = payload;
-            const connectedPeers = await nodesAPI.promQuery.instantQuery(
-                `archival_discovery_amount_of_peers{exported_instance="${nodeId}"}`,
-            );
+            let connectedPeers;
+            try {
+                connectedPeers = await nodesAPI.promQuery.instantQuery(
+                    `archival_discovery_amount_of_peers{exported_instance="${nodeId}"}`,
+                );
+                if (!connectedPeers.result || connectedPeers.result.length === 0) {
+                    connectedPeers = await nodesAPI.promQuery.instantQuery(
+                        `archival_discovery_amount_of_peers{instance="${nodeId}"}`,
+                    );
+                }
+            } catch (error) {
+                connectedPeers = await nodesAPI.promQuery.instantQuery(
+                    `archival_discovery_amount_of_peers{instance="${nodeId}"}`,
+                );
+            }
             const [data] = connectedPeers.result;
             return {
                 isFired: !data || data.value.value < 1,

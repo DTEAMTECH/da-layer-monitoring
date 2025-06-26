@@ -3,7 +3,7 @@ import { nodesAPI } from "app/services/api.ts";
 import { disApi } from "app/utils.ts";
 import { EmbedBuilder } from "discord.js";
 import alerts, { CheckResult } from "app/alerts.ts";
-import config from "app/config.ts";
+import config, { getNetworkType } from "app/config.ts";
 import { CONSECUTIVE_ALERTS_THRESHOLD } from "app/constant.ts";
 
 interface Subscription {
@@ -35,8 +35,71 @@ async function runCron() {
     
     try {
         console.log("📡 Fetching all node IDs...");
-        const allNodeIds = await nodesAPI.getAllNodesIds();
-        console.log(`✅ Found ${allNodeIds.length} node IDs: [${allNodeIds.join(', ')}]`);
+        console.log(`🔧 Debug info: Prometheus URL = ${config.PROMETHEUS_URL}`);
+        
+        // Enhanced debugging for getAllNodesIds
+        let allNodeIds: string[] = [];
+        try {
+            // Check basic Prometheus connectivity first
+            console.log("🔗 Testing Prometheus connectivity...");
+            const basicQuery = await nodesAPI.promQuery.instantQuery('up');
+            console.log(`✅ Prometheus connection OK, found ${basicQuery.result.length} 'up' metrics`);
+            
+            // Check what labels exist
+            console.log("🏷️  Checking available labels...");
+            const allLabels = await nodesAPI.promQuery.labelNames();
+            console.log(`📋 Available labels: [${allLabels.slice(0, 10).join(', ')}${allLabels.length > 10 ? '...' : ''}] (${allLabels.length} total)`);
+            
+            // Check if exported_instance label exists
+            if (allLabels.includes('exported_instance')) {
+                console.log("✅ 'exported_instance' label found");
+                
+                // Get all exported_instance values without time filter first
+                console.log("🔍 Fetching all exported_instance values (no time filter)...");
+                const allInstancesNoFilter = await nodesAPI.promQuery.labelValues('exported_instance');
+                console.log(`📊 Total exported_instance values: ${allInstancesNoFilter.length}`);
+                console.log(`📝 Sample values: [${allInstancesNoFilter.slice(0, 5).join(', ')}${allInstancesNoFilter.length > 5 ? '...' : ''}]`);
+                
+                // Now try with time filter
+                const date = new Date();
+                date.setDate(date.getDate() - 1);
+                console.log(`📅 Using time range: ${date.toISOString()} to ${new Date().toISOString()}`);
+                
+                const timeFilteredInstances = await nodesAPI.promQuery.labelValues(
+                    'exported_instance',
+                    undefined,
+                    date,
+                    new Date()
+                );
+                console.log(`⏰ Time-filtered exported_instance values: ${timeFilteredInstances.length}`);
+                
+                // Apply IP filter
+                const ipRegex = /\b(?:\d{1,3}\.){3}\d{1,3}\b/;
+                const beforeFilter = timeFilteredInstances.length;
+                allNodeIds = timeFilteredInstances.filter((nodeId) => !ipRegex.test(nodeId));
+                console.log(`🔧 After IP filter: ${allNodeIds.length} (removed ${beforeFilter - allNodeIds.length} IP addresses)`);
+                
+            } else {
+                console.error("❌ 'exported_instance' label NOT found in Prometheus!");
+                console.log("🔍 Looking for similar labels...");
+                const similarLabels = allLabels.filter(label => 
+                    label.includes('instance') || 
+                    label.includes('exported') || 
+                    label.includes('node')
+                );
+                console.log(`🎯 Similar labels found: [${similarLabels.join(', ')}]`);
+            }
+            
+        } catch (error) {
+            console.error("💥 Error during enhanced node ID fetching:", error);
+            console.error("📋 Error details:", error instanceof Error ? error.message : 'Unknown error');
+            
+            // Fallback to original method
+            console.log("🔄 Falling back to original getAllNodesIds method...");
+            allNodeIds = await nodesAPI.getAllNodesIds();
+        }
+        
+        console.log(`✅ Final result: Found ${allNodeIds.length} node IDs: [${allNodeIds.join(', ')}]`);
 
         const checksMap = new Map<string, { name: string; message: Function; isFired: boolean }[]>();
         let totalChecks = 0;
@@ -110,7 +173,7 @@ async function runCron() {
                         userId,
                         nodeId,
                         prev.nodeType,
-                        config.CHAIN_ID === "mocha-4" ? "Testnet" : "Mainnet",
+                        getNetworkType(),
                     );
                     const embedAlert = createEmbed(alertMessage.title, alertMessage.text);
                     const embedResolve = createEmbed(resolveMessage.title, resolveMessage.text);

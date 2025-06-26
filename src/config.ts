@@ -37,6 +37,6 @@ export const parseNodeType = (jobLabel: string): string | null => {
   return parts.length >= 2 ? parts[1] : null;
 };
 
-console.log(`🌐 Network config: CHAIN_ID=${config.CHAIN_ID}, JobPrefix=${getJobPrefix()}, NetworkType=${getNetworkType()}`);
+console.log(`Network config: CHAIN_ID=${config.CHAIN_ID}, JobPrefix=${getJobPrefix()}, NetworkType=${getNetworkType()}`);
 
 export default config;

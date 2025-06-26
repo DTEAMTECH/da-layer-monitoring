@@ -42,16 +42,16 @@ async function highstsubjectiveHeadGauge() {
     if (highstsubjectiveHeadGauge.cache && 
         highstsubjectiveHeadGauge.cacheTimestamp && 
         (now - highstsubjectiveHeadGauge.cacheTimestamp) < CACHE_TTL_MS) {
-        console.log(`📦 Using cached highstsubjectiveHeadGauge: ${highstsubjectiveHeadGauge.cache}`);
+        console.log(`Using cached highstsubjectiveHeadGauge: ${highstsubjectiveHeadGauge.cache}`);
         return highstsubjectiveHeadGauge.cache;
     }
 
-    console.log(`🔄 Fetching fresh highstsubjectiveHeadGauge data...`);
+    console.log(`Fetching fresh highstsubjectiveHeadGauge data...`);
     
     try {
         // Use centralized network-aware logic
         const jobPattern = getJobPattern();
-        console.log(`🔍 Fetching max head gauge with job pattern: "${jobPattern}"`);
+        console.log(`Fetching max head gauge with job pattern: "${jobPattern}"`);
         
         const result = await nodesAPI.promQuery.instantQuery(
             `max(hdr_sync_subjective_head_gauge{exported_job=~"${jobPattern}"})`,
@@ -63,13 +63,13 @@ async function highstsubjectiveHeadGauge() {
         highstsubjectiveHeadGauge.cache = value;
         highstsubjectiveHeadGauge.cacheTimestamp = now;
         
-        console.log(`✅ Updated highstsubjectiveHeadGauge cache: ${value}`);
+        console.log(`Updated highstsubjectiveHeadGauge cache: ${value}`);
         return value;
     } catch (error) {
-        console.error(`❌ Failed to fetch highstsubjectiveHeadGauge:`, error);
+        console.error(`Failed to fetch highstsubjectiveHeadGauge:`, error);
         // Return cached value if available, even if expired, rather than failing completely
         if (highstsubjectiveHeadGauge.cache !== null) {
-            console.warn(`⚠️  Using stale cached value due to fetch error: ${highstsubjectiveHeadGauge.cache}`);
+            console.warn(`Using stale cached value due to fetch error: ${highstsubjectiveHeadGauge.cache}`);
             return highstsubjectiveHeadGauge.cache;
         }
         throw error;

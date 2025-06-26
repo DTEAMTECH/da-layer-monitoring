@@ -19,16 +19,16 @@ class NodesAPI {
     // Try exported_instance first, then fallback to instance
     let data: string[] = [];
     try {
-      console.log("🔍 Trying 'exported_instance' label...");
+      console.log("Trying 'exported_instance' label...");
       data = await this.promQuery.labelValues(
           "exported_instance",
           undefined,
           date,
           new Date()
       );
-      console.log(`✅ Found ${data.length} exported_instance values`);
+      console.log(`Found ${data.length} exported_instance values`);
     } catch (error) {
-      console.log("⚠️  'exported_instance' failed, trying 'instance' label...");
+      console.log("'exported_instance' failed, trying 'instance' label...");
       try {
         data = await this.promQuery.labelValues(
             "instance",
@@ -36,17 +36,17 @@ class NodesAPI {
             date,
             new Date()
         );
-        console.log(`✅ Found ${data.length} instance values`);
+        console.log(`Found ${data.length} instance values`);
       } catch (instanceError) {
-        console.error("❌ Both 'exported_instance' and 'instance' failed:", instanceError);
+        console.error("Both 'exported_instance' and 'instance' failed:", instanceError);
         return [];
       }
     }
     
     const ipRegex = /\b(?:\d{1,3}\.){3}\d{1,3}\b/;
     const filtered = data.filter((nodeId) => !ipRegex.test(nodeId));
-    console.log(`🔧 After IP filter: ${filtered.length} nodes (removed ${data.length - filtered.length} IPs)`);
-    console.log(`📋 Node IDs: [${filtered.slice(0, 3).join(', ')}${filtered.length > 3 ? '...' : ''}]`);
+    console.log(`After IP filter: ${filtered.length} nodes (removed ${data.length - filtered.length} IPs)`);
+    console.log(`Node IDs: [${filtered.slice(0, 3).join(', ')}${filtered.length > 3 ? '...' : ''}]`);
     
     return filtered;
   }
@@ -97,15 +97,15 @@ class NodesAPI {
 
       // Use centralized network-aware logic
       const jobPrefix = getJobPrefix();
-      console.log(`🏷️  Looking for job labels with prefix: "${jobPrefix}" (CHAIN_ID: ${config.CHAIN_ID})`);
+      console.log(`Looking for job labels with prefix: "${jobPrefix}" (CHAIN_ID: ${config.CHAIN_ID})`);
 
       for (const result of data.result) {
         const jobLabel: string | undefined = result.metric.labels.exported_job || result.metric.labels.job;
-        console.log(`🔍 Found job label: "${jobLabel}"`);
+        console.log(`Found job label: "${jobLabel}"`);
 
         const nodeType = parseNodeType(jobLabel || "");
         if (nodeType) {
-          console.log(`✅ Extracted node type: "${nodeType}" from job label: "${jobLabel}"`);
+          console.log(`Extracted node type: "${nodeType}" from job label: "${jobLabel}"`);
           return nodeType;
         }
       }

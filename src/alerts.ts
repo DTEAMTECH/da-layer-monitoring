@@ -35,19 +35,45 @@ export type Alert = {
 };
 
 async function highstsubjectiveHeadGauge() {
-    if (highstsubjectiveHeadGauge.cache) {
+    const CACHE_TTL_MS = 60000;
+    const now = Date.now();
+    
+    // Check if cache is valid (exists and not expired)
+    if (highstsubjectiveHeadGauge.cache && 
+        highstsubjectiveHeadGauge.cacheTimestamp && 
+        (now - highstsubjectiveHeadGauge.cacheTimestamp) < CACHE_TTL_MS) {
+        console.log(`📦 Using cached highstsubjectiveHeadGauge: ${highstsubjectiveHeadGauge.cache}`);
         return highstsubjectiveHeadGauge.cache;
     }
 
-    const result = await nodesAPI.promQuery.instantQuery(
-        `max(hdr_sync_subjective_head_gauge{exported_job=~"celestia/.*"})`,
-    );
+    console.log(`🔄 Fetching fresh highstsubjectiveHeadGauge data...`);
+    
+    try {
+        const result = await nodesAPI.promQuery.instantQuery(
+            `max(hdr_sync_subjective_head_gauge{exported_job=~"celestia/.*"})`,
+        );
 
-    highstsubjectiveHeadGauge.cache = result.result[0].value.value ?? null;
-    return result.result[0].value.value ?? null;
+        const value = result.result[0]?.value?.value ?? null;
+        
+        // Update cache with timestamp
+        highstsubjectiveHeadGauge.cache = value;
+        highstsubjectiveHeadGauge.cacheTimestamp = now;
+        
+        console.log(`✅ Updated highstsubjectiveHeadGauge cache: ${value}`);
+        return value;
+    } catch (error) {
+        console.error(`❌ Failed to fetch highstsubjectiveHeadGauge:`, error);
+        // Return cached value if available, even if expired, rather than failing completely
+        if (highstsubjectiveHeadGauge.cache !== null) {
+            console.warn(`⚠️  Using stale cached value due to fetch error: ${highstsubjectiveHeadGauge.cache}`);
+            return highstsubjectiveHeadGauge.cache;
+        }
+        throw error;
+    }
 }
 
 highstsubjectiveHeadGauge.cache = null as null | number;
+highstsubjectiveHeadGauge.cacheTimestamp = null as null | number;
 
 const alerts = [
     {

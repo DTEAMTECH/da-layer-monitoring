@@ -1,8 +1,9 @@
-version: "3"
+version: "3.8"
+
 services:
   bridge-discord-bot:
     build: .
-    container_name: deno-container
+    container_name: deno-container-da-metrics
     image: deno-image
     ports:
       - "8000:8000"
@@ -10,23 +11,127 @@ services:
       - .env
     volumes:
       - ./bot_data:/app/bot_data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health", "||", "exit", "1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 256M
+          cpus: '0.25'
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - monitoring-network
+    depends_on:
+      prometheus:
+        condition: service_healthy
 
   bridge-cron:
     build: .
-    container_name: cron-container
+    container_name: cron-container-da-metrics
     image: deno-image
     env_file:
       - .env
     volumes:
       - ./bot_data:/app/bot_data
-    command: sh -c "while true; do deno run -A src/cron.ts || echo 'Cron task failed'; sleep 300; done"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "deno.*cron.ts", "||", "exit", "1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.3'
+        reservations:
+          memory: 128M
+          cpus: '0.1'
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - monitoring-network
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    command: >
+      sh -c "
+        echo 'Starting cron service with enhanced error handling...'
+        while true; do
+          echo '[$(date -Iseconds)] Starting cron execution'
+          if deno run -A src/cron.ts; then
+            echo '[$(date -Iseconds)] Cron execution completed successfully'
+          else
+            exit_code=$$?
+            echo '[$(date -Iseconds)] ERROR: Cron execution failed with exit code $$exit_code'
+            if [ $$exit_code -eq 130 ]; then
+              echo '[$(date -Iseconds)] Received interrupt signal, exiting...'
+              exit 0
+            fi
+          fi
+          echo '[$(date -Iseconds)] Waiting 300 seconds before next execution...'
+          sleep 300
+        done
+      "
 
   prometheus:
     image: prom/prometheus:latest
-    container_name: prometheus
+    container_name: prometheus-da-metrics
     ports:
       - "9090:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9090/-/healthy", "||", "exit", "1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '0.5'
+        reservations:
+          memory: 512M
+          cpus: '0.25'
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+    networks:
+      - monitoring-network
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/etc/prometheus/console_libraries"
+      - "--web.console.templates=/etc/prometheus/consoles"
+      - "--storage.tsdb.retention.time=15d"
+      - "--web.enable-lifecycle"
+
+networks:
+  monitoring-network:
+    driver: bridge
+
+volumes:
+  prometheus-data:
+    driver: local

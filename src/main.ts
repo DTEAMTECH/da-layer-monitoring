@@ -8,7 +8,17 @@ import nacl from "https://esm.sh/tweetnacl@v1.0.3?dts";
 serve({
   "/api/interactions": main,
   "/cmds_register": cmdsRegisterHandler,
+  "/health": healthCheck,
 });
+
+async function healthCheck(request: Request) {
+  return json({ 
+    status: "healthy", 
+    timestamp: new Date().toISOString(),
+    service: "da-layer-monitoring",
+    version: "1.0.0"
+  });
+}
 
 async function main(request: Request) {
   console.log("Request headers", request.headers);

@@ -56,22 +56,22 @@ services:
       - prometheus
     command: >
       sh -c "
-        echo 'Starting cron service with enhanced error handling...'
-        echo 'Waiting 30 seconds for Prometheus to be ready...'
+        echo '🚀 Starting cron service with enhanced error handling...'
+        echo '⏳ Waiting 30 seconds for Prometheus to be ready...'
         sleep 30
         while true; do
-          echo '[$(date -Iseconds)] Starting cron execution'
+          echo '▶️  Starting cron execution'
           if deno run -A src/cron.ts; then
-            echo '[$(date -Iseconds)] Cron execution completed successfully'
+            echo '✅ Cron execution completed successfully'
           else
             exit_code=$$?
-            echo '[$(date -Iseconds)] ERROR: Cron execution failed with exit code $$exit_code'
+            echo '❌ ERROR: Cron execution failed with exit code $$exit_code'
             if [ $$exit_code -eq 130 ]; then
-              echo '[$(date -Iseconds)] Received interrupt signal, exiting...'
+              echo '🛑 Received interrupt signal, exiting...'
               exit 0
             fi
           fi
-          echo '[$(date -Iseconds)] Waiting 300 seconds before next execution...'
+          echo '💤 Waiting 300 seconds before next execution...'
           sleep 300
         done
       "

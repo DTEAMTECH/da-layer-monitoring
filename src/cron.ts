@@ -18,6 +18,7 @@ interface Subscription {
             lastFired: boolean;
         }
     >;
+    labels?: Record<string, string>;
 }
 
 const createEmbed = (title: string, text: string) =>
@@ -37,30 +38,24 @@ async function runCron() {
         console.log("Fetching all node IDs...");
         console.log(`Debug info: Prometheus URL = ${config.PROMETHEUS_URL}`);
         
-        // Enhanced debugging for getAllNodesIds
         let allNodeIds: string[] = [];
         try {
-            // Check basic Prometheus connectivity first
             console.log("Testing Prometheus connectivity...");
             const basicQuery = await nodesAPI.promQuery.instantQuery('up');
             console.log(`Prometheus connection OK, found ${basicQuery.result.length} 'up' metrics`);
             
-            // Check what labels exist
             console.log("Checking available labels...");
             const allLabels = await nodesAPI.promQuery.labelNames();
             console.log(`Available labels: [${allLabels.slice(0, 10).join(', ')}${allLabels.length > 10 ? '...' : ''}] (${allLabels.length} total)`);
             
-            // Check if exported_instance label exists
             if (allLabels.includes('exported_instance')) {
                 console.log("'exported_instance' label found");
                 
-                // Get all exported_instance values without time filter first
                 console.log("Fetching all exported_instance values (no time filter)...");
                 const allInstancesNoFilter = await nodesAPI.promQuery.labelValues('exported_instance');
                 console.log(`Total exported_instance values: ${allInstancesNoFilter.length}`);
                 console.log(`Sample values: [${allInstancesNoFilter.slice(0, 5).join(', ')}${allInstancesNoFilter.length > 5 ? '...' : ''}]`);
                 
-                // Now try with time filter
                 const date = new Date();
                 date.setDate(date.getDate() - 1);
                 console.log(`Using time range: ${date.toISOString()} to ${new Date().toISOString()}`);
@@ -94,7 +89,6 @@ async function runCron() {
             console.error("Error during enhanced node ID fetching:", error);
             console.error("Error details:", error instanceof Error ? error.message : 'Unknown error');
             
-            // Fallback to original method
             console.log("Falling back to original getAllNodesIds method...");
             allNodeIds = await nodesAPI.getAllNodesIds();
         }
@@ -156,6 +150,18 @@ async function runCron() {
                 continue;
             }
 
+            // Try to fetch fresh node info to update labels
+            let updatedLabels = prev.labels;
+            try {
+                const nodeInfo = await nodesAPI.buildInfo(nodeId);
+                if (nodeInfo && nodeInfo.metric && nodeInfo.metric.labels) {
+                    updatedLabels = nodeInfo.metric.labels;
+                    console.log(`  Updated labels for ${nodeId}`);
+                }
+            } catch (error) {
+                console.log(`  Failed to update labels for ${nodeId}, keeping existing labels`);
+            }
+
             const prevState = prev.state ?? {};
             const newState: Subscription["state"] = {};
             let alertsTriggered = 0;
@@ -201,6 +207,7 @@ async function runCron() {
             try {
                 await kv.set<Subscription>(["subscription", userId, nodeId], {
                     ...prev,
+                    labels: updatedLabels,
                     state: newState,
                 });
                 console.log(`  Updated state for ${userId}/${nodeId}: ${alertsTriggered} triggered, ${alertsResolved} resolved`);
@@ -215,7 +222,6 @@ async function runCron() {
         const cronDuration = Date.now() - cronStartTime;
         console.log(`[${new Date().toISOString()}] Cron execution completed successfully in ${cronDuration}ms`);
         
-        // Return success metrics for monitoring
         return {
             success: true,
             duration: cronDuration,
@@ -232,14 +238,11 @@ async function runCron() {
         console.error(`[${new Date().toISOString()}] CRITICAL ERROR in runCron after ${cronDuration}ms:`, error);
         console.error(`Error stack:`, error instanceof Error ? error.stack : 'No stack trace available');
         
-        // Log environment information for debugging
         console.error(`Debug info:`);
         console.error(`  - PROMETHEUS_URL: ${config.PROMETHEUS_URL || 'NOT SET'}`);
         console.error(`  - BOT_TOKEN: ${config.BOT_TOKEN ? '[SET]' : '[NOT SET]'}`);
         console.error(`  - CHAIN_ID: ${config.CHAIN_ID || 'NOT SET'}`);
         
-        // Instead of exiting, return error information
-        // This prevents the entire process from terminating
         return {
             success: false,
             error: error instanceof Error ? error.message : 'Unknown error',
@@ -248,16 +251,13 @@ async function runCron() {
     }
 }
 
-// Execute cron and handle the result
 try {
     const result = await runCron();
     if (result.success) {
         console.log(`Cron completed successfully`);
     } else {
         console.error(`Cron failed: ${result.error}`);
-        // Log the error but don't exit - this allows the cron to retry later
     }
 } catch (unexpectedError) {
     console.error(`Unexpected error outside runCron:`, unexpectedError);
-    // Even here, we don't exit - we want the process to stay alive
 }

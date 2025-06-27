@@ -83,10 +83,28 @@ export const info: Command = {
         const sub = entry.value;
         const nodeType = sub.nodeType ?? "Unknown";
 
-        let labels = sub.labels;
+        let labels: Record<string, string> | null = null;
+        let isUsingStoredData = false;
+        
+        const info = await nodesAPI.buildInfo(nodeId);
+        if (info && info.metric && info.metric.labels) {
+            labels = info.metric.labels;
+        } else {
+            if (sub.labels) {
+                labels = sub.labels;
+                isUsingStoredData = true;
+            }
+        }
+
+        // If we have no data at all (neither fresh nor stored), show error
         if (!labels) {
-            const info = await nodesAPI.buildInfo(nodeId);
-            labels = info?.metric.labels ?? {};
+            const embed = new EmbedBuilder()
+                .setTitle("Error")
+                .setDescription("Failed to retrieve node information. The node might be down and no cached data is available.")
+                .setColor(0xaf3838)
+                .setThumbnail("https://raw.githubusercontent.com/DTEAMTECH/contributions/refs/heads/main/celestia/utils/da_layer_metrics.png")
+                .setFooter({text: "Powered by www.dteam.tech \uD83D\uDFE0"})
+            return json({type: 4, data: {embeds: [embed], flags: 64}});
         }
 
         const liveAlerts: string[] = [];
@@ -111,6 +129,10 @@ export const info: Command = {
             `**Build Time:** ${labels.build_time ?? "N/A"}\n` +
             `**System Version:** ${labels.system_version ?? "N/A"}`;
 
+        const dataStatusIndicator = isUsingStoredData 
+            ? "\n\nThe **Node Details** cannot be retrieved from the endpoint. *Cached data is shown above*" 
+            : "";
+
         const embed = new EmbedBuilder()
             .setTitle("Subscribed Node Information")
             .setColor(0x7b2bf9)
@@ -123,7 +145,7 @@ export const info: Command = {
                 { name: "Chain ID", value: `**\`${config.CHAIN_ID ?? "Unknown"}\`**`, inline: false },
                 { name: "Alerts", value: `**\`${alertMsg}\`**`, inline: false },
                 { name: "", value: "", inline: false },
-                { name: "Node Details", value: details, inline: false }
+                { name: "Node Details", value: details + dataStatusIndicator, inline: false }
             ]);
 
         return json({type: 4, data: {embeds: [embed], flags: 64}});

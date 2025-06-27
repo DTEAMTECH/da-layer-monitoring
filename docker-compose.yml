@@ -1,8 +1,7 @@
-version: "3"
 services:
   bridge-discord-bot:
     build: .
-    container_name: deno-container
+    container_name: deno-container-da-metrics
     image: deno-image
     ports:
       - "8000:8000"
@@ -10,23 +9,109 @@ services:
       - .env
     volumes:
       - ./bot_data:/app/bot_data
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 256M
+          cpus: '0.25'
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - monitoring-network
+    depends_on:
+      - prometheus
 
   bridge-cron:
     build: .
-    container_name: cron-container
+    container_name: cron-container-da-metrics
     image: deno-image
     env_file:
       - .env
     volumes:
       - ./bot_data:/app/bot_data
-    command: sh -c "while true; do deno run -A src/cron.ts || echo 'Cron task failed'; sleep 300; done"
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.3'
+        reservations:
+          memory: 128M
+          cpus: '0.1'
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - monitoring-network
+    depends_on:
+      - prometheus
+    command: >
+      sh -c "
+        echo 'Starting cron service with enhanced error handling...'
+        echo 'Waiting 30 seconds for Prometheus to be ready...'
+        sleep 30
+        while true; do
+          echo 'Starting cron execution'
+          if deno run -A src/cron.ts; then
+            echo 'Cron execution completed successfully'
+          else
+            exit_code=$$?
+            echo 'ERROR: Cron execution failed with exit code $$exit_code'
+            if [ $$exit_code -eq 130 ]; then
+              echo 'Received interrupt signal, exiting...'
+              exit 0
+            fi
+          fi
+          echo 'Waiting 300 seconds before next execution...'
+          sleep 300
+        done
+      "
 
   prometheus:
     image: prom/prometheus:latest
-    container_name: prometheus
+    container_name: prometheus-da-metrics
     ports:
       - "9090:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '0.5'
+        reservations:
+          memory: 512M
+          cpus: '0.25'
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+    networks:
+      - monitoring-network
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/etc/prometheus/console_libraries"
+      - "--web.console.templates=/etc/prometheus/consoles"
+      - "--storage.tsdb.retention.time=15d"
+      - "--web.enable-lifecycle"
+
+networks:
+  monitoring-network:
+    driver: bridge
+
+volumes:
+  prometheus-data:
+    driver: local

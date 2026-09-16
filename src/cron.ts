@@ -2,22 +2,20 @@ import { kv } from "app/services/storage.ts";
 import { nodesAPI } from "app/services/api.ts";
 import { disApi } from "app/utils.ts";
 import { EmbedBuilder } from "discord.js";
-import alerts, { CheckResult } from "app/alerts.ts";
+import alerts, { Alert, CheckResult } from "app/alerts.ts";
+import {
+    AlertState,
+    CheckStatus,
+    nextAlertState,
+} from "app/services/alert_state.ts";
 import config, { getNetworkType, parseNodeType } from "app/config.ts";
-import { CONSECUTIVE_ALERTS_THRESHOLD } from "app/constant.ts";
 
 interface Subscription {
     userId: string;
     nodeId: string;
     nodeType: string;
     subscribedAt: string;
-    state?: Record<
-        string,
-        {
-            count: number;
-            lastFired: boolean;
-        }
-    >;
+    state?: Record<string, AlertState>;
     labels?: Record<string, string>;
 }
 
@@ -95,21 +93,48 @@ async function runCron() {
         
         console.log(`Final result: Found ${allNodeIds.length} node IDs: [${allNodeIds.join(', ')}]`);
 
-        const checksMap = new Map<string, { name: string; message: Function; isFired: boolean }[]>();
+        // Per node: run all applicable checks once and cache the node's
+        // build_info labels + parsed node type, so the subscription loop
+        // below does not need to query Prometheus again.
+        interface NodeCheckData {
+            results: { name: string; message: Alert["message"]; status: CheckStatus }[];
+            labels: Record<string, string> | null;
+            nodeType: string | null;
+        }
+        const checksMap = new Map<string, NodeCheckData>();
         let totalChecks = 0;
         let failedChecks = 0;
-        
+        let skippedChecks = 0;
+
         for (const nodeId of allNodeIds) {
             console.log(`Processing node: ${nodeId}`);
-            const results: { name: string; message: Function; isFired: boolean }[] = [];
-            
+
+            let labels: Record<string, string> | null = null;
+            let nodeType: string | null = null;
+            try {
+                const nodeInfo = await nodesAPI.buildInfo(nodeId);
+                if (nodeInfo && nodeInfo.metric && nodeInfo.metric.labels) {
+                    labels = nodeInfo.metric.labels as Record<string, string>;
+                    nodeType = parseNodeType(labels.exported_job || labels.job || "");
+                }
+            } catch {
+                console.log(`  Failed to fetch build_info for ${nodeId}, node type unknown`);
+            }
+
+            const results: NodeCheckData["results"] = [];
+
             for (const alertDef of alerts) {
+                if (alertDef.appliesTo && !alertDef.appliesTo(nodeType)) {
+                    skippedChecks++;
+                    console.log(`  Skipping check: ${alertDef.name} for ${nodeId} (not applicable to node type ${nodeType ?? "unknown"})`);
+                    continue;
+                }
                 totalChecks++;
                 let res: CheckResult;
                 try {
                     console.log(`  Running check: ${alertDef.name} for ${nodeId}`);
                     res = await alertDef.check({ nodeId });
-                    console.log(`  ${alertDef.name}: isFired=${res.isFired}, value=${res.value} ${res.isFired ? '[FIRED]' : '[OK]'}`);
+                    console.log(`  ${alertDef.name}: status=${res.status}, value=${res.value}${res.status === "fired" ? " [FIRED]" : res.status === "no_data" ? " [NO DATA]" : " [OK]"}`);
                 } catch (e) {
                     failedChecks++;
                     console.error(`  Error checking ${nodeId} / ${alertDef.name}:`, e);
@@ -119,14 +144,14 @@ async function runCron() {
                 results.push({
                     name: alertDef.name,
                     message: alertDef.message,
-                    isFired: res.isFired,
+                    status: res.status,
                 });
             }
-            checksMap.set(nodeId, results);
+            checksMap.set(nodeId, { results, labels, nodeType });
             console.log(`Completed checks for ${nodeId}: ${results.length} successful checks`);
         }
-        
-        console.log(`Check summary: ${totalChecks - failedChecks}/${totalChecks} successful, ${failedChecks} failed`);
+
+        console.log(`Check summary: ${totalChecks - failedChecks}/${totalChecks} successful, ${failedChecks} failed, ${skippedChecks} skipped (node type filter)`);
 
         console.log("Processing subscriptions...");
         let subscriptionsProcessed = 0;
@@ -144,35 +169,20 @@ async function runCron() {
             const [, userId, nodeId] = key;
             console.log(`Processing subscription: userId=${userId}, nodeId=${nodeId}`);
             
-            const checks = checksMap.get(nodeId);
-            if (!checks) {
+            const nodeData = checksMap.get(nodeId);
+            if (!nodeData) {
                 console.warn(`No checks found for nodeId: ${nodeId} (user: ${userId})`);
                 continue;
             }
 
-            // Try to fetch fresh node info to update labels
-            let updatedLabels = prev.labels;
+            // Reuse the labels/node type fetched during the check phase.
+            // Heal missing/Unknown node type (e.g. after a network migration
+            // like mocha-4 -> mocha-5).
+            const updatedLabels = nodeData.labels ?? prev.labels;
             let updatedNodeType = prev.nodeType;
-            try {
-                const nodeInfo = await nodesAPI.buildInfo(nodeId);
-                if (nodeInfo && nodeInfo.metric && nodeInfo.metric.labels) {
-                    const freshLabels = nodeInfo.metric.labels as Record<string, string>;
-                    updatedLabels = freshLabels;
-                    console.log(`  Updated labels for ${nodeId}`);
-
-                    // Heal missing/Unknown node type from the job label (e.g.
-                    // after a network migration like mocha-4 -> mocha-5)
-                    if (!updatedNodeType || updatedNodeType === "Unknown") {
-                        const jobLabel = freshLabels.exported_job || freshLabels.job || "";
-                        const freshType = parseNodeType(jobLabel);
-                        if (freshType) {
-                            updatedNodeType = freshType;
-                            console.log(`  Healed node type for ${String(nodeId)}: ${freshType}`);
-                        }
-                    }
-                }
-            } catch (error) {
-                console.log(`  Failed to update labels for ${nodeId}, keeping existing labels`);
+            if ((!updatedNodeType || updatedNodeType === "Unknown") && nodeData.nodeType) {
+                updatedNodeType = nodeData.nodeType;
+                console.log(`  Healed node type for ${String(nodeId)}: ${updatedNodeType}`);
             }
 
             const prevState = prev.state ?? {};
@@ -180,41 +190,38 @@ async function runCron() {
             let alertsTriggered = 0;
             let alertsResolved = 0;
 
-            for (const { name, message, isFired } of checks) {
-                const { count: prevCount = 0, lastFired: wasActive = false } = prevState[name] || {};
-                const newCount = isFired ? prevCount + 1 : 0;
-                const isActive = newCount >= CONSECUTIVE_ALERTS_THRESHOLD;
+            for (const { name, message, status } of nodeData.results) {
+                const { state, action } = nextAlertState(prevState[name], status);
 
-                console.log(`  Alert ${name}: count=${newCount}, isActive=${isActive}, wasActive=${wasActive}, isFired=${isFired}`);
+                console.log(`  Alert ${name}: status=${status}, count=${state.count}, okCount=${state.okCount}, active=${state.lastFired}, action=${action}`);
 
-                try {
-                    const { alertMessage, resolveMessage } = message(
-                        userId,
-                        nodeId,
-                        prev.nodeType,
-                        getNetworkType(),
-                    );
-                    const embedAlert = createEmbed(alertMessage.title, alertMessage.text);
-                    const embedResolve = createEmbed(resolveMessage.title, resolveMessage.text);
+                if (action !== "none") {
+                    try {
+                        const { alertMessage, resolveMessage } = message(
+                            userId,
+                            String(nodeId),
+                            updatedNodeType,
+                            getNetworkType(),
+                        );
 
-                    if (isFired && isActive && !wasActive) {
-                        console.log(`  Sending alert notification for ${name} to user ${userId}`);
-                        await disApi.sendEmbedMessageUser(userId, embedAlert);
-                        alertsTriggered++;
-                        notificationsSent++;
+                        if (action === "alert") {
+                            console.log(`  Sending alert notification for ${name} to user ${userId}`);
+                            await disApi.sendEmbedMessageUser(userId, createEmbed(alertMessage.title, alertMessage.text));
+                            alertsTriggered++;
+                            notificationsSent++;
+                        } else {
+                            console.log(`  Sending resolve notification for ${name} to user ${userId}`);
+                            await disApi.sendEmbedMessageUser(userId, createEmbed(resolveMessage.title, resolveMessage.text));
+                            alertsResolved++;
+                            notificationsSent++;
+                        }
+                    } catch (error) {
+                        subscriptionErrors++;
+                        console.error(`  Failed to send notification for ${name} to user ${userId}:`, error);
                     }
-                    else if (!isFired && wasActive) {
-                        console.log(`  Sending resolve notification for ${name} to user ${userId}`);
-                        await disApi.sendEmbedMessageUser(userId, embedResolve);
-                        alertsResolved++;
-                        notificationsSent++;
-                    }
-                } catch (error) {
-                    subscriptionErrors++;
-                    console.error(`  Failed to send notification for ${name} to user ${userId}:`, error);
                 }
 
-                newState[name] = { count: newCount, lastFired: isActive };
+                newState[name] = state;
             }
 
             try {

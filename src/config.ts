@@ -13,28 +13,57 @@ const config = {
 };
 
 // Network-aware helper functions
+// Mainnet chain id is "celestia"; any other chain id (e.g. "mocha-4", "mocha-5")
+// is treated as a testnet. Nothing is tied to a specific testnet chain id, so
+// testnet migrations (mocha-4 -> mocha-5) only require updating CHAIN_ID.
+export const isMainnet = () => {
+  return config.CHAIN_ID?.toLowerCase() === "celestia";
+};
+
 export const getJobPrefix = () => {
-  return config.CHAIN_ID === "mocha-4" ? "mocha-4/" : "celestia/";
+  return `${config.CHAIN_ID}/`;
 };
 
 export const getJobPattern = () => {
-  return config.CHAIN_ID === "mocha-4" ? "mocha-4/.*" : "celestia/.*";
+  return `${config.CHAIN_ID}/.*`;
 };
 
 export const getNetworkType = () => {
-  return config.CHAIN_ID === "mocha-4" ? "Testnet" : "Mainnet";
+  return isMainnet() ? "Mainnet" : "Testnet";
 };
 
+// Known celestia DA node types (job labels use the "<network>/<type>" format,
+// e.g. "celestia/bridge" or "mocha-5/bridge").
+const KNOWN_NODE_TYPES = ["bridge", "full", "light"];
+
+const capitalize = (value: string) =>
+  value.charAt(0).toUpperCase() + value.slice(1).toLowerCase();
+
 export const parseNodeType = (jobLabel: string): string | null => {
-  const jobPrefix = getJobPrefix();
-  
-  if (!jobLabel || !jobLabel.startsWith(jobPrefix)) {
+  if (!jobLabel || !jobLabel.includes("/")) {
     return null;
   }
-  
-  // Both testnet and mainnet now use the same format: "prefix/type"
+
+  // Job format: "<network>/<type>", take the last segment as the node type
   const parts = jobLabel.split("/");
-  return parts.length >= 2 ? parts[1] : null;
+  const rawType = parts[parts.length - 1]?.trim();
+  if (!rawType) {
+    return null;
+  }
+
+  // Prefer jobs of the currently configured network
+  if (jobLabel.startsWith(getJobPrefix())) {
+    return capitalize(rawType);
+  }
+
+  // Fallback: accept "<network>/<known type>" from any network. This keeps
+  // node type detection working while a network migrates to a new chain id
+  // (e.g. mocha-4 -> mocha-5) and stale jobs with the old prefix still exist.
+  if (KNOWN_NODE_TYPES.includes(rawType.toLowerCase())) {
+    return capitalize(rawType);
+  }
+
+  return null;
 };
 
 console.log(`Network config: CHAIN_ID=${config.CHAIN_ID}, JobPrefix=${getJobPrefix()}, NetworkType=${getNetworkType()}`);

@@ -30,19 +30,29 @@
 
 ## Alerts list
 
-1. **Low Peer Count Alert**  
+1. **Node Down Alert**  
+   Notifies you when your node stops reporting metrics entirely—usually meaning the node is down or its metrics pipeline is broken. When this happens, it is the *only* alert you receive: the other checks stay paused until the node reports again, so one outage produces exactly one alert.
+
+2. **Low Peer Count Alert**  
    Automatically notifies you when your node loses peers, ensuring you’re aware of potential connectivity issues.
 
-2. **Stalled Blocks Alert**  
+3. **Stalled Blocks Alert**  
    Alerts you if the block height fails to increase over a set time period (default: 10 minutes), helping you identify synchronization or performance bottlenecks quickly.
 
-3. **Node Sync Alert**  
-   Triggers a notification if your node falls behind the network (by more than 50 blocks), so you can take immediate corrective actions.
+4. **Node Sync Alert**  
+   Triggers a notification if your node falls behind the network reference head (by more than 50 blocks), so you can take immediate corrective actions. The reference is an outlier-robust quantile over all nodes of the network, so a single misbehaving node cannot make your node look out of sync.
 
-4. **No Archival Peers Alert**  
-   Warns you if the monitored node is not running in archival mode, allowing you to address potential data unavailability issues.
+5. **No Archival Peers Alert** *(Bridge & Full nodes only)*  
+   Warns you if the monitored node has no archival peers, allowing you to address potential data unavailability issues. This check is intentionally disabled for **Light** nodes: archival peers are a small subset of the network and light nodes legitimately report zero of them.
+
+### How alerting works
+
+- An alert is triggered only after the same issue is detected in **3 consecutive checks** (checks run every ~5 minutes, so ≈ 15 minutes to alert)—brief blips never page you.
+- A **Resolved** message is sent only after **3 consecutive healthy checks**, so a flapping node does not produce alert/resolve ping-pong.
+- If a metric is temporarily unavailable (scrape gap, monitoring hiccup), the affected check is **paused** instead of firing—missing data is never treated as a violation.
 
 ---
+
 
 ## Supported Commands
 

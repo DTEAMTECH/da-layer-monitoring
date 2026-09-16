@@ -4,7 +4,9 @@ import {
     SYNC_TIME_CHECK,
 } from "app/constant.ts";
 import { nodesAPI } from "app/services/api.ts";
-import config, { getJobPattern, getNetworkType } from "app/config.ts";
+import type { CheckStatus } from "app/services/alert_state.ts";
+import { getJobPattern } from "app/config.ts";
+import type { InstantVector } from "prometheus-query";
 
 type checkPayload = {
     nodeId: string;
@@ -16,73 +18,129 @@ type Message = {
 };
 
 export type CheckResult = {
-    isFired: boolean;
+    status: CheckStatus;
     value: number | string;
 };
 
 export type Alert = {
     name: string;
-    message: (userId: string, nodeId: string, nodeType: string) => {
+    // Optional node-type filter: when it returns false the check is skipped
+    // entirely for that node (e.g. light nodes legitimately report 0
+    // archival peers, so NoArchivalPeers does not apply to them).
+    // nodeType is null when it could not be determined; checks run in that
+    // case unless the filter explicitly handles null otherwise.
+    appliesTo?: (nodeType: string | null) => boolean;
+    message: (
+        userId: string,
+        nodeId: string,
+        nodeType: string,
+        networkType: string,
+    ) => {
         alertMessage: Message;
         resolveMessage: Message;
     };
-    check(
-        payload: checkPayload,
-    ): Promise<{
-        isFired: boolean;
-        value: number | string;
-    }>;
+    check(payload: checkPayload): Promise<CheckResult>;
 };
 
-async function highstsubjectiveHeadGauge() {
+// Runs a PromQL expression for a node, trying the exported_instance label
+// first and falling back to instance. Returns the first series or null when
+// the node has no data for this expression.
+async function queryNodeSeries(
+    expr: (label: string, nodeId: string) => string,
+    nodeId: string,
+): Promise<InstantVector | null> {
+    let data;
+    try {
+        data = await nodesAPI.promQuery.instantQuery(
+            expr("exported_instance", nodeId),
+        );
+        if (!data.result || data.result.length === 0) {
+            data = await nodesAPI.promQuery.instantQuery(
+                expr("instance", nodeId),
+            );
+        }
+    } catch {
+        try {
+            data = await nodesAPI.promQuery.instantQuery(
+                expr("instance", nodeId),
+            );
+        } catch {
+            return null;
+        }
+    }
+    if (!data.result || data.result.length === 0) {
+        return null;
+    }
+    return data.result[0];
+}
+
+// Network reference head: quantile(0.9) over all nodes of this network.
+// quantile is used instead of max so a single rogue/misconfigured node
+// reporting an inflated height cannot make the whole network look out of
+// sync. Cached for 60s; null when it cannot be determined (callers must
+// treat that as "no_data", never as a violation).
+async function networkReferenceHead(): Promise<number | null> {
     const CACHE_TTL_MS = 60000;
     const now = Date.now();
-    
-    // Check if cache is valid (exists and not expired)
-    if (highstsubjectiveHeadGauge.cache && 
-        highstsubjectiveHeadGauge.cacheTimestamp && 
-        (now - highstsubjectiveHeadGauge.cacheTimestamp) < CACHE_TTL_MS) {
-        console.log(`Using cached highstsubjectiveHeadGauge: ${highstsubjectiveHeadGauge.cache}`);
-        return highstsubjectiveHeadGauge.cache;
+
+    if (
+        networkReferenceHead.cache !== null &&
+        networkReferenceHead.cacheTimestamp !== null &&
+        (now - networkReferenceHead.cacheTimestamp) < CACHE_TTL_MS
+    ) {
+        return networkReferenceHead.cache;
     }
 
-    console.log(`Fetching fresh highstsubjectiveHeadGauge data...`);
-    
     try {
-        // Use centralized network-aware logic
         const jobPattern = getJobPattern();
-        console.log(`Fetching max head gauge with job pattern: "${jobPattern}"`);
-        
         const result = await nodesAPI.promQuery.instantQuery(
-            `max(hdr_sync_subjective_head_gauge{exported_job=~"${jobPattern}"})`,
+            `quantile(0.9, hdr_sync_subjective_head_gauge{exported_job=~"${jobPattern}"})`,
         );
-
-        const value = result.result[0]?.value?.value ?? null;
-        
-        // Update cache with timestamp
-        highstsubjectiveHeadGauge.cache = value;
-        highstsubjectiveHeadGauge.cacheTimestamp = now;
-        
-        console.log(`Updated highstsubjectiveHeadGauge cache: ${value}`);
+        const raw = result.result[0]?.value?.value;
+        const value = raw === null || raw === undefined ? null : Number(raw);
+        if (value !== null && !Number.isFinite(value)) {
+            return networkReferenceHead.cache;
+        }
+        networkReferenceHead.cache = value;
+        networkReferenceHead.cacheTimestamp = now;
         return value;
     } catch (error) {
-        console.error(`Failed to fetch highstsubjectiveHeadGauge:`, error);
-        // Return cached value if available, even if expired, rather than failing completely
-        if (highstsubjectiveHeadGauge.cache !== null) {
-            console.warn(`Using stale cached value due to fetch error: ${highstsubjectiveHeadGauge.cache}`);
-            return highstsubjectiveHeadGauge.cache;
-        }
-        throw error;
+        console.error(`Failed to fetch network reference head:`, error);
+        return networkReferenceHead.cache;
     }
 }
 
-highstsubjectiveHeadGauge.cache = null as null | number;
-highstsubjectiveHeadGauge.cacheTimestamp = null as null | number;
+networkReferenceHead.cache = null as null | number;
+networkReferenceHead.cacheTimestamp = null as null | number;
 
-const alerts = [
+const alerts: Alert[] = [
+    {
+        // Fires when the node stops reporting metrics at all (build_info
+        // series missing): the node is down or its metrics pipeline is
+        // broken. All other checks return "no_data" in that situation and
+        // stay frozen, so a downed node produces exactly this one alert.
+        name: "NodeDown",
+        message: (userId, nodeId, nodeType, networkType) => ({
+            alertMessage: {
+                title: "**Warning!** Node Down Alert",
+                text: `**<@${userId}> take action! Your${" \`" + networkType + " " + nodeType + "\` " || " "}node**\n\n**\`${nodeId}\`** is not reporting metrics. The node may be down or its metrics pipeline is broken.`,
+            },
+            resolveMessage: {
+                title: "**Resolved!** Node Down Alert",
+                text: `**<@${userId}> you can chillin' now! Your${" \`" + networkType + " " + nodeType + "\` " || " "}node**\n\n**\`${nodeId}\`** is reporting metrics again.`,
+            },
+        }),
+        async check(payload: checkPayload) {
+            const info = await nodesAPI.buildInfo(payload.nodeId);
+            return {
+                status: info ? "ok" : "fired",
+                value: info ? 1 : 0,
+            };
+        },
+    },
     {
         name: "LowPeersCount",
-        message: (userId: string, nodeId: string, nodeType: string, networkType: string) => ({
+        message: (userId, nodeId, nodeType, networkType) => ({
             alertMessage: {
                 title: "**Warning!** Low Peer Count Alert",
                 text: `**<@${userId}> take action! Your${" \`" + networkType + " " + nodeType + "\` " || " "}node**\n\n**\`${nodeId}\`** has fewer than ${CONNECTED_PEERS_THRESHOLD} connected peers.`,
@@ -93,33 +151,23 @@ const alerts = [
             },
         }),
         async check(payload: checkPayload) {
-            const { nodeId } = payload;
-            // Try exported_instance first, then instance
-            let connectedPeers;
-            try {
-                connectedPeers = await nodesAPI.promQuery.instantQuery(
-                    `full_discovery_amount_of_peers{exported_instance="${nodeId}"}`,
-                );
-                if (!connectedPeers.result || connectedPeers.result.length === 0) {
-                    connectedPeers = await nodesAPI.promQuery.instantQuery(
-                        `full_discovery_amount_of_peers{instance="${nodeId}"}`,
-                    );
-                }
-            } catch (error) {
-                connectedPeers = await nodesAPI.promQuery.instantQuery(
-                    `full_discovery_amount_of_peers{instance="${nodeId}"}`,
-                );
-            }
-            const [data] = connectedPeers.result;
+            const data = await queryNodeSeries(
+                (label, nodeId) =>
+                    `full_discovery_amount_of_peers{${label}="${nodeId}"}`,
+                payload.nodeId,
+            );
+            if (!data) return { status: "no_data", value: 0 };
             return {
-                isFired: !data || data.value.value < CONNECTED_PEERS_THRESHOLD,
-                value: data ? data.value.value : 0,
+                status: data.value.value < CONNECTED_PEERS_THRESHOLD
+                    ? "fired"
+                    : "ok",
+                value: data.value.value,
             };
         },
     },
     {
         name: "StalledBlocks",
-        message: (userId: string, nodeId: string, nodeType: string, networkType: string) => ({
+        message: (userId, nodeId, nodeType, networkType) => ({
             alertMessage: {
                 title: "**Warning!** Stalled Blocks Alert",
                 text: `**<@${userId}> take action! Your${" \`" + networkType + " " + nodeType + "\` " || " "}node**\n\n**\`${nodeId}\`** has stalled blocks.`,
@@ -130,32 +178,21 @@ const alerts = [
             },
         }),
         async check(payload: checkPayload) {
-            const { nodeId } = payload;
-            let hightChange;
-            try {
-                hightChange = await nodesAPI.promQuery.instantQuery(
-                    `increase(hdr_sync_subjective_head_gauge{exported_instance="${nodeId}"}[${SYNC_TIME_CHECK}])`,
-                );
-                if (!hightChange.result || hightChange.result.length === 0) {
-                    hightChange = await nodesAPI.promQuery.instantQuery(
-                        `increase(hdr_sync_subjective_head_gauge{instance="${nodeId}"}[${SYNC_TIME_CHECK}])`,
-                    );
-                }
-            } catch (error) {
-                hightChange = await nodesAPI.promQuery.instantQuery(
-                    `increase(hdr_sync_subjective_head_gauge{instance="${nodeId}"}[${SYNC_TIME_CHECK}])`,
-                );
-            }
-            const [data] = hightChange.result;
+            const data = await queryNodeSeries(
+                (label, nodeId) =>
+                    `increase(hdr_sync_subjective_head_gauge{${label}="${nodeId}"}[${SYNC_TIME_CHECK}])`,
+                payload.nodeId,
+            );
+            if (!data) return { status: "no_data", value: 0 };
             return {
-                isFired: !data || data.value.value === 0,
-                value: data ? data.value.value : 0,
+                status: data.value.value === 0 ? "fired" : "ok",
+                value: data.value.value,
             };
         },
     },
     {
         name: "OutOfSync",
-        message: (userId: string, nodeId: string, nodeType: string, networkType: string) => ({
+        message: (userId, nodeId, nodeType, networkType) => ({
             alertMessage: {
                 title: "**Warning!** Node Sync Alert",
                 text: `**<@${userId}> take action! Your${" \`" + networkType + " " + nodeType + "\` " || " "}node**\n\n**\`${nodeId}\`** is out of sync.`,
@@ -166,39 +203,33 @@ const alerts = [
             },
         }),
         async check(payload: checkPayload) {
-            const { nodeId } = payload;
-            const highestSubjectiveHeadGaugeValue = await highstsubjectiveHeadGauge();
-            let hightOfNodeResult;
-            try {
-                hightOfNodeResult = await nodesAPI.promQuery
-                    .instantQuery(
-                        `hdr_sync_subjective_head_gauge{exported_instance="${nodeId}"}`,
-                    );
-                if (!hightOfNodeResult.result || hightOfNodeResult.result.length === 0) {
-                    hightOfNodeResult = await nodesAPI.promQuery
-                        .instantQuery(
-                            `hdr_sync_subjective_head_gauge{instance="${nodeId}"}`,
-                        );
-                }
-            } catch (error) {
-                hightOfNodeResult = await nodesAPI.promQuery
-                    .instantQuery(
-                        `hdr_sync_subjective_head_gauge{instance="${nodeId}"}`,
-                    );
-            }
-            const [data] = hightOfNodeResult.result;
+            const referenceHead = await networkReferenceHead();
+            // Without a trustworthy network reference we cannot evaluate
+            // sync status — never treat this as a violation.
+            if (referenceHead === null) return { status: "no_data", value: 0 };
+
+            const data = await queryNodeSeries(
+                (label, nodeId) =>
+                    `hdr_sync_subjective_head_gauge{${label}="${nodeId}"}`,
+                payload.nodeId,
+            );
+            if (!data) return { status: "no_data", value: 0 };
             return {
-                isFired: !data ||
-                    highestSubjectiveHeadGaugeValue === null ||
-                    highestSubjectiveHeadGaugeValue - data.value.value >
-                    OUT_OF_SYNC_HEIGHT_THRESHOLD,
-                value: data ? data.value.value : 0,
+                status:
+                    referenceHead - data.value.value > OUT_OF_SYNC_HEIGHT_THRESHOLD
+                        ? "fired"
+                        : "ok",
+                value: data.value.value,
             };
         },
     },
     {
         name: "NoArchivalPeers",
-        message: (userId: string, nodeId: string, nodeType: string, networkType: string) => ({
+        // Light nodes legitimately report 0 archival peers: the archival
+        // rendezvous set contains only archival full/bridge nodes (a small
+        // subset of the network) and light nodes never advertise on it.
+        appliesTo: (nodeType) => nodeType !== "Light",
+        message: (userId, nodeId, nodeType, networkType) => ({
             alertMessage: {
                 title: "**Warning!** No Archival Peers Alert",
                 text: `**<@${userId}> take action! Your${" \`" + networkType + " " + nodeType + "\` " || " "}node**\n\n**\`${nodeId}\`** has no archival peers.`,
@@ -209,110 +240,18 @@ const alerts = [
             },
         }),
         async check(payload: checkPayload) {
-            const { nodeId } = payload;
-            let connectedPeers;
-            try {
-                connectedPeers = await nodesAPI.promQuery.instantQuery(
-                    `archival_discovery_amount_of_peers{exported_instance="${nodeId}"}`,
-                );
-                if (!connectedPeers.result || connectedPeers.result.length === 0) {
-                    connectedPeers = await nodesAPI.promQuery.instantQuery(
-                        `archival_discovery_amount_of_peers{instance="${nodeId}"}`,
-                    );
-                }
-            } catch (error) {
-                connectedPeers = await nodesAPI.promQuery.instantQuery(
-                    `archival_discovery_amount_of_peers{instance="${nodeId}"}`,
-                );
-            }
-            const [data] = connectedPeers.result;
+            const data = await queryNodeSeries(
+                (label, nodeId) =>
+                    `archival_discovery_amount_of_peers{${label}="${nodeId}"}`,
+                payload.nodeId,
+            );
+            if (!data) return { status: "no_data", value: 0 };
             return {
-                isFired: !data || data.value.value < 1,
-                value: data ? data.value.value : 0,
+                status: data.value.value < 1 ? "fired" : "ok",
+                value: data.value.value,
             };
         },
     },
 ];
 
-export default alerts as Alert[];
-
-// const alertsMock = [
-//     {
-//         name: "LowPeersCount",
-//         message: (userId: string, nodeId: string, nodeType: string) => ({
-//             alertMessage: {
-//                 title: "**Warning!** Low Peer Count Alert",
-//                 text: `**<@${userId}> take action! Your${" \`" + nodeType + "\` " || " "}node**\n\n**\`${nodeId}\`** has fewer than ${CONNECTED_PEERS_THRESHOLD} connected peers.`,
-//             },
-//             resolveMessage: {
-//                 title: "**Resolved!** Low Peer Count Alert",
-//                 text: `**<@${userId}> you can chillin' now! Your${" \`" + nodeType + "\` " || " "}node**\n\n**\`${nodeId}\`** now has more than ${CONNECTED_PEERS_THRESHOLD} connected peers.`,
-//             },
-//         }),
-//         async check(payload: checkPayload) {
-//             return {
-//                 isFired: false,
-//                 value: 1,
-//             };
-//         },
-//     },
-//     {
-//         name: "StalledBlocks",
-//         message: (userId: string, nodeId: string, nodeType: string) => ({
-//             alertMessage: {
-//                 title: "**Warning!** Stalled Blocks Alert",
-//                 text: `**<@${userId}> take action! Your${" \`" + nodeType + "\` " || " "}node**\n\n**\`${nodeId}\`** has stalled blocks.`,
-//             },
-//             resolveMessage: {
-//                 title: "**Resolved!** Stalled Blocks Alert",
-//                 text: `**<@${userId}> you can chillin' now! Your${" \`" + nodeType + "\` " || " "}node**\n\n**\`${nodeId}\`** has no stalled blocks now.`,
-//             },
-//         }),
-//         async check(payload: checkPayload) {
-//             return {
-//                 isFired: false,
-//                 value: 1,
-//             };
-//         },
-//     },
-//     {
-//         name: "OutOfSync",
-//         message: (userId: string, nodeId: string, nodeType: string) => ({
-//             alertMessage: {
-//                 title: "**Warning!** Node Sync Alert",
-//                 text: `**<@${userId}> take action! Your${" \`" + nodeType + "\` " || " "}node**\n\n**\`${nodeId}\`** is out of sync.`,
-//             },
-//             resolveMessage: {
-//                 title: "**Resolved!** Node Sync Alert",
-//                 text: `**<@${userId}> you can chillin' now! Your${" \`" + nodeType + "\` " || " "}node**\n\n**\`${nodeId}\`** is synced now.`,
-//             },
-//         }),
-//         async check(payload: checkPayload) {
-//             return {
-//                 isFired: false,
-//                 value: 0,
-//             };
-//         },
-//     },
-//     {
-//         name: "NoArchivalPeers",
-//         message: (userId: string, nodeId: string, nodeType: string) => ({
-//             alertMessage: {
-//                 title: "**Warning!** No Archival Peers Alert",
-//                 text: `**<@${userId}> take action! Your${" \`" + nodeType + "\` " || " "}node**\n\n**\`${nodeId}\`** has no archival peers.`,
-//             },
-//             resolveMessage: {
-//                 title: "**Resolved!** No Archival Peers Alert",
-//                 text: `**<@${userId}> you can chillin' now! Your${" \`" + nodeType + "\` " || " "}node**\n\n**\`${nodeId}\`** now has archival peers.`,
-//             },
-//         }),
-//         async check(payload: checkPayload) {
-//             return {
-//                 isFired: false,
-//                 value: 0,
-//             };
-//         },
-//     },
-// ];
-//
-// export default alertsMock as Alert[];
+export default alerts;

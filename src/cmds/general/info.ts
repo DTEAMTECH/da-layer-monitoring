@@ -12,11 +12,14 @@ import type {
     APIApplicationCommandAutocompleteInteraction,
 } from "discord.js";
 import config, { parseNodeType } from "app/config.ts";
+import { CONSECUTIVE_ALERTS_THRESHOLD } from "app/constant.ts";
+import type { AlertState } from "app/services/alert_state.ts";
 
 interface SubRecord {
     nodeType?: string;
     labels?: Record<string, string>;
     alerted?: Record<string, string>;
+    state?: Record<string, AlertState>;
 }
 
 const command = new SlashCommandBuilder()
@@ -123,21 +126,28 @@ export const info: Command = {
             }
         }
 
-        const liveAlerts: string[] = [];
+        // Show the real alert state machine status (the same truth that
+        // drives DM notifications), not one-shot live checks.
+        const stateMap = sub.state ?? {};
+        const activeAlerts: string[] = [];
+        const pendingAlerts: string[] = [];
         for (const alertDef of alerts) {
-            let result;
-            try {
-                result = await alertDef.check({nodeId});
-            } catch {
-                continue;
-            }
-            if (result.isFired) {
-                liveAlerts.push(alertDef.name);
+            if (alertDef.appliesTo && !alertDef.appliesTo(nodeType)) continue;
+            const st = stateMap[alertDef.name];
+            if (st?.lastFired) {
+                activeAlerts.push(alertDef.name);
+            } else if ((st?.count ?? 0) > 0) {
+                pendingAlerts.push(
+                    `${alertDef.name} (${st?.count}/${CONSECUTIVE_ALERTS_THRESHOLD} checks)`,
+                );
             }
         }
-        const alertMsg = liveAlerts.length > 0
-            ? `\u{1F534} You have ${liveAlerts.length}/4 active alerts: ${liveAlerts.join(", ")}`
-            : "\u{1F7E2} Your node is synced and has no active alerts.";
+        const alertMsg = activeAlerts.length > 0
+            ? `\u{1F534} Active alerts: ${activeAlerts.join(", ")}` +
+                (pendingAlerts.length > 0 ? `\n\u{1F7E1} Pending: ${pendingAlerts.join(", ")}` : "")
+            : pendingAlerts.length > 0
+                ? `\u{1F7E1} No active alerts. Pending: ${pendingAlerts.join(", ")}`
+                : "\u{1F7E2} Your node is synced and has no active alerts.";
 
         const details = `**Build Version:** ${labels.semantic_version ?? "N/A"}\n` +
             `**Go Version:** ${labels.golang_version ?? "N/A"}\n` +

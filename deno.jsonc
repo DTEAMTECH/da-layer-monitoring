@@ -11,7 +11,8 @@
     "discord.js": "npm:discord.js@^14.16.3",
     "p-retry": "npm:p-retry@^6.2.1",
     "prometheus-query": "npm:prometheus-query@^3.4.1",
-    "sift/": "https://deno.land/x/sift@0.6.0/"
+    "sift/": "https://deno.land/x/sift@0.6.0/",
+    "https://cdn.skypack.dev/http-cache-semantics?dts": "https://esm.sh/http-cache-semantics@4.1.1?dts"
   },
   "unstable": [
     "cron",

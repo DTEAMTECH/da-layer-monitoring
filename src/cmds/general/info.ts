@@ -11,7 +11,7 @@ import {json} from "sift/mod.ts";
 import type {
     APIApplicationCommandAutocompleteInteraction,
 } from "discord.js";
-import config from "app/config.ts";
+import config, { parseNodeType } from "app/config.ts";
 
 interface SubRecord {
     nodeType?: string;
@@ -81,7 +81,7 @@ export const info: Command = {
         }
 
         const sub = entry.value;
-        const nodeType = sub.nodeType ?? "Unknown";
+        let nodeType = sub.nodeType ?? "Unknown";
 
         let labels: Record<string, string> | null = null;
         let isUsingStoredData = false;
@@ -105,6 +105,22 @@ export const info: Command = {
                 .setThumbnail("https://raw.githubusercontent.com/DTEAMTECH/contributions/refs/heads/main/celestia/utils/da_layer_metrics.png")
                 .setFooter({text: "Powered by www.dteam.tech \uD83D\uDFE0"})
             return json({type: 4, data: {embeds: [embed], flags: 64}});
+        }
+
+        // Re-resolve the node type from the job label when the stored value is
+        // missing/Unknown (e.g. subscriptions created before a network migration
+        // like mocha-4 -> mocha-5) and persist the healed value.
+        if (nodeType === "Unknown") {
+            const jobLabel = labels.exported_job || labels.job || "";
+            const freshType = parseNodeType(jobLabel);
+            if (freshType) {
+                nodeType = freshType;
+                try {
+                    await kv.set(["subscription", userId, nodeId], {...sub, nodeType: freshType});
+                } catch {
+                    // Non-critical: display still uses the freshly parsed type
+                }
+            }
         }
 
         const liveAlerts: string[] = [];

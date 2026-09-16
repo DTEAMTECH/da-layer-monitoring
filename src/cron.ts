@@ -3,7 +3,7 @@ import { nodesAPI } from "app/services/api.ts";
 import { disApi } from "app/utils.ts";
 import { EmbedBuilder } from "discord.js";
 import alerts, { CheckResult } from "app/alerts.ts";
-import config, { getNetworkType } from "app/config.ts";
+import config, { getNetworkType, parseNodeType } from "app/config.ts";
 import { CONSECUTIVE_ALERTS_THRESHOLD } from "app/constant.ts";
 
 interface Subscription {
@@ -152,11 +152,24 @@ async function runCron() {
 
             // Try to fetch fresh node info to update labels
             let updatedLabels = prev.labels;
+            let updatedNodeType = prev.nodeType;
             try {
                 const nodeInfo = await nodesAPI.buildInfo(nodeId);
                 if (nodeInfo && nodeInfo.metric && nodeInfo.metric.labels) {
-                    updatedLabels = nodeInfo.metric.labels;
+                    const freshLabels = nodeInfo.metric.labels as Record<string, string>;
+                    updatedLabels = freshLabels;
                     console.log(`  Updated labels for ${nodeId}`);
+
+                    // Heal missing/Unknown node type from the job label (e.g.
+                    // after a network migration like mocha-4 -> mocha-5)
+                    if (!updatedNodeType || updatedNodeType === "Unknown") {
+                        const jobLabel = freshLabels.exported_job || freshLabels.job || "";
+                        const freshType = parseNodeType(jobLabel);
+                        if (freshType) {
+                            updatedNodeType = freshType;
+                            console.log(`  Healed node type for ${String(nodeId)}: ${freshType}`);
+                        }
+                    }
                 }
             } catch (error) {
                 console.log(`  Failed to update labels for ${nodeId}, keeping existing labels`);
@@ -207,6 +220,7 @@ async function runCron() {
             try {
                 await kv.set<Subscription>(["subscription", userId, nodeId], {
                     ...prev,
+                    nodeType: updatedNodeType,
                     labels: updatedLabels,
                     state: newState,
                 });

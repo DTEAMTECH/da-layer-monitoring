@@ -11,7 +11,7 @@ import {json} from "sift/mod.ts";
 import type {
     APIApplicationCommandAutocompleteInteraction,
 } from "discord.js";
-import config from "app/config.ts";
+import { getNetworkType } from "app/config.ts";
 
 const command = new SlashCommandBuilder()
     .setName("subscribe")
@@ -112,7 +112,7 @@ export const subscribe: Command = {
 
         const embed = new EmbedBuilder()
             .setTitle("Subscription Success")
-            .setDescription(`You have been subscribed to **\`${config.CHAIN_ID === "celestia" ? "Mainnet" : "Testnet"} ${nodeType ?? "Unknown"}\`** node **\`${param.value}\`**`)
+            .setDescription(`You have been subscribed to **\`${getNetworkType()} ${nodeType ?? "Unknown"}\`** node **\`${param.value}\`**`)
             .setColor(0x7b2bf9)
             .setThumbnail("https://raw.githubusercontent.com/DTEAMTECH/contributions/refs/heads/main/celestia/utils/da_layer_metrics.png")
             .setFooter({text: "Powered by www.dteam.tech \uD83D\uDFE0"})

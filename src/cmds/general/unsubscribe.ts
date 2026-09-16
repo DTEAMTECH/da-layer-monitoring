@@ -6,7 +6,7 @@ import {
 import {kv} from "app/services/storage.ts";
 import type {Command} from "app/cmds/mod.ts";
 import {json} from "sift/mod.ts";
-import config from "app/config.ts";
+import { getNetworkType } from "app/config.ts";
 
 const command = new SlashCommandBuilder()
     .setName("unsubscribe")
@@ -80,7 +80,7 @@ export const unsubscribe: Command = {
 
         const embed = new EmbedBuilder()
             .setTitle("Unsubscribed Successfully")
-            .setDescription(`You have successfully unsubscribed from **\`${config.CHAIN_ID === "celestia" ? "Mainnet" : "Testnet"} ${nodeType ?? "Unknown"}\`** node **\`${param.value}\`**`)
+            .setDescription(`You have successfully unsubscribed from **\`${getNetworkType()} ${nodeType ?? "Unknown"}\`** node **\`${param.value}\`**`)
             .setColor(0x7b2bf9)
             .setThumbnail("https://raw.githubusercontent.com/DTEAMTECH/contributions/refs/heads/main/celestia/utils/da_layer_metrics.png")
             .setFooter({text: "Powered by www.dteam.tech \uD83D\uDFE0"})
